@@ -47,6 +47,7 @@ logger = init_logger(__name__)
 TOOL_CALL_START = "<|tool_call>"
 TOOL_CALL_END = "<tool_call|>"
 STRING_DELIM = '<|"|>'
+CHANNEL_CLOSE = "<channel|>"  # channel transition token, never content
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +356,8 @@ class Gemma4ToolParser(ToolParser):
         self.current_tool_name_sent = False
         self.prev_tool_call_arr: list[dict] = []
         self.streamed_args_for_tool: list[str] = []
+        self.buffered_delta_text = ""  # reset here, not only in __init__
+        self._active_depth = 0  # number of unmatched ``<|tool_call>`` starts
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -384,7 +387,7 @@ class Gemma4ToolParser(ToolParser):
         This prevents partial special tokens (e.g., ``<|tool``) from being
         emitted prematurely as content text.
         """
-        combined = self.buffered_delta_text + delta_text
+        combined = (self.buffered_delta_text + delta_text).replace(CHANNEL_CLOSE, "")
 
         # Check if combined ends with a complete special token
         if combined.endswith(TOOL_CALL_START) or combined.endswith(TOOL_CALL_END):
@@ -392,7 +395,7 @@ class Gemma4ToolParser(ToolParser):
             return combined
 
         # Check if combined ends with a partial prefix of a special token
-        for tag in [TOOL_CALL_START, TOOL_CALL_END]:
+        for tag in [TOOL_CALL_START, TOOL_CALL_END, CHANNEL_CLOSE]:
             for i in range(1, len(tag)):
                 if combined.endswith(tag[:i]):
                     self.buffered_delta_text = combined[-i:]
@@ -466,6 +469,9 @@ class Gemma4ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        if not previous_text:
+            self._reset_streaming_state()
+
         # Buffer delta text to handle multi-token special sequences
         delta_text = self._buffer_delta_text(delta_text)
         # Keep current_text from the upstream stream state. The buffered delta
@@ -508,43 +514,49 @@ class Gemma4ToolParser(ToolParser):
         prev_start_count = previous_text.count(self.tool_call_start_token)
         prev_end_count = previous_text.count(self.tool_call_end_token)
 
-        # Case 1: Not inside any tool call — emit as content
-        if (
-            start_count == end_count
-            and prev_end_count == end_count
-            and self.tool_call_end_token not in delta_text
-        ):
-            if delta_text:
-                return DeltaMessage(content=delta_text)
-            return None
+        new_starts = start_count - prev_start_count
+        new_ends = end_count - prev_end_count
 
-        # Case 2: Starting a new tool call
-        if start_count > prev_start_count and start_count > end_count:
+        # Pure content — no tool call activity at all
+        if self._active_depth == 0 and new_starts == 0:
+            return DeltaMessage(content=delta_text) if delta_text else None
+
+        collected: list[DeltaToolCall] = []
+
+        # 1. Initialize state for every newly opened tool call
+        for _ in range(new_starts):
             self.current_tool_id += 1
             self.current_tool_name_sent = False
             self.streamed_args_for_tool.append("")
             self.prev_tool_call_arr.append({})
             logger.debug("Starting new tool call %d", self.current_tool_id)
-            # Don't return yet — fall through to try parsing if there's
-            # content after <|tool_call> in this same delta
-            # (but usually it's just the token itself, so return None)
-            if len(delta_text) <= len(self.tool_call_start_token):
-                return None
+            self._active_depth += 1
 
-        # Case 3: Tool call just ended
-        if end_count > prev_end_count:
-            return self._handle_tool_call_end(current_text)
+        # 2. Finalize every newly closed tool call
+        # Calls close in FIFO order.  The first unfinalized id is
+        #   (current_tool_id - _active_depth + 1)
+        # and we step upward for each new close.
+        first_closing_id = self.current_tool_id - self._active_depth + 1
+        for i in range(new_ends):
+            if self._active_depth == 0:
+                break
+            target_id = first_closing_id + i
+            # Temporarily redirect so _handle_tool_call_end reads the right slot
+            saved_id, self.current_tool_id = self.current_tool_id, target_id
+            msg = self._handle_tool_call_end(current_text)
+            self.current_tool_id = saved_id
+            if msg and msg.tool_calls:
+                collected.extend(msg.tool_calls)
+            self._active_depth -= 1
 
-        # Case 4: In the middle of a tool call — parse partial content
-        if start_count > end_count:
-            return self._handle_tool_call_middle(current_text)
+        # 3. Stream partial args for the one still-open call if any
+        if self._active_depth > 0:
+            msg = self._handle_tool_call_middle(current_text)
+            if msg and msg.tool_calls:
+                collected.extend(msg.tool_calls)
 
-        # Default: generate text outside tool calls
-        if delta_text:
-            text = delta_text.replace(self.tool_call_start_token, "")
-            text = text.replace(self.tool_call_end_token, "")
-            if text:
-                return DeltaMessage(content=text)
+        if collected:
+            return DeltaMessage(tool_calls=collected)
         return None
 
     def _extract_partial_call(self, current_text: str) -> tuple[str | None, str]:
