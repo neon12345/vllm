@@ -96,6 +96,22 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
                 return True
         return False
 
+    def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        """
+        Streaming-consistent content extraction.
+        - split on first end_token_id OR tool_call_token_id
+        - boundary token is INCLUDED in output (not stripped)
+        """
+        cut_pos = None
+        for i, tid in enumerate(input_ids):
+            if tid == self.end_token_id:
+                cut_pos = i
+                break
+            if tid == self.tool_call_token_id:
+                cut_pos = i
+                break
+        return None if cut_pos is None else input_ids[cut_pos:]
+
     # ------------------------------------------------------------------
     # Non-streaming path
     # ------------------------------------------------------------------
