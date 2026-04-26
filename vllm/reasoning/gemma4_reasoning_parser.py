@@ -100,17 +100,16 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         """
         Streaming-consistent content extraction.
         - split on first end_token_id OR tool_call_token_id
+        - boundary token is INCLUDED in output (not stripped)
         """
         cut_pos = None
         for i, tid in enumerate(input_ids):
             if tid == self.end_token_id:
-                cut_pos = i + 1 if i + 1 != len(input_ids) else None
+                cut_pos = i
                 break
             if tid == self.tool_call_token_id:
-                cut_pos = i + 1
+                cut_pos = i
                 break
-        if cut_pos == len(input_ids):
-            cut_pos = None
         return [] if cut_pos is None else input_ids[cut_pos:]
 
     # ------------------------------------------------------------------
