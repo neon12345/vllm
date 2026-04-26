@@ -618,7 +618,7 @@ class DelegatingParser(Parser):
                     current_text = delta_message.content
                     delta_message.content = None
                 else:
-                    current_text = ""
+                    current_text = delta_text
 
         # Tool call extraction
         if self._in_tool_call_phase(state):
