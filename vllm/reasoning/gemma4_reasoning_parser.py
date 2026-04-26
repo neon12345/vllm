@@ -104,7 +104,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         cut_pos = None
         for i, tid in enumerate(input_ids):
             if tid == self.end_token_id:
-                cut_pos = i + 1
+                cut_pos = i + 1 if i + 1 != len(input_ids) else None
                 break
             if tid == self.tool_call_token_id:
                 cut_pos = i + 1
