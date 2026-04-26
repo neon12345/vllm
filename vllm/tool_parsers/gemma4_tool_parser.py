@@ -48,6 +48,7 @@ logger = init_logger(__name__)
 TOOL_CALL_START = "<|tool_call>"
 TOOL_CALL_END = "<tool_call|>"
 STRING_DELIM = '<|"|>'
+TAG_OPEN = '<'
 CHANNEL_CLOSE = "<channel|>"  # channel transition token, never content
 
 
@@ -460,6 +461,17 @@ class Gemma4ToolParser(ToolParser):
             if tid in self.special_tokens:
                 self.token_queue.append(tid)
 
+    def _remove_channel_close(self) -> str:
+        content = self.content_buffer.replace(CHANNEL_CLOSE, "")
+        spos = content.rfind(TAG_OPEN)
+        suffix = content[spos:] if spos != -1 else ""
+        if spos != -1 and CHANNEL_CLOSE.startswith(suffix):
+            self.content_buffer = suffix
+            return content.removesuffix(suffix)
+        else:
+            self.content_buffer = ""
+            return content;
+
     def _process_queue(self):
         """
         Converts token_queue + raw_buffer state into events.
@@ -536,13 +548,12 @@ class Gemma4ToolParser(ToolParser):
             return None
 
         def result() -> DeltaMessage | None:
-            content = self.content_buffer
+            content = self._remove_channel_close()
             if not content:
                 content = None
                 if not self.tool_calls:
                     return None
             out = DeltaMessage(content=content, tool_calls=self.tool_calls)
-            self.content_buffer = ""
             self.tool_calls = []
             return out
 
