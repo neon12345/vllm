@@ -110,6 +110,8 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
             if tid == self.tool_call_token_id:
                 cut_pos = i
                 break
+        if cut_pos == len(input_ids) - 1:
+            cut_pos = None
         return None if cut_pos is None else input_ids[cut_pos:]
 
     # ------------------------------------------------------------------
